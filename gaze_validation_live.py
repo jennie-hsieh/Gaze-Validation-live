@@ -57,6 +57,15 @@ def parse_args(argv=None):
                    help="webcam 固定延遲(秒),會從 CV 時間戳中扣掉")
     p.add_argument("--cv-gain", type=float, default=1.0,
                    help="以 0.5 為中心放大 CV gaze-x,只影響顯示尺度,不影響相關係數")
+    p.add_argument("--zoom", type=float, default=1.0,
+                   help="鏡頭拉近倍率(數位變焦):從畫面中央裁切後放回原本大小,視窗與畫面大小不變。"
+                        "1 = 不拉近;例如 1.5、2.0")
+    p.add_argument("--zoom-center", type=float, nargs=2, default=[0.5, 0.5], metavar=("X", "Y"),
+                   help="拉近的中心,以你看到的(鏡像)畫面為準:X 0=左 1=右,Y 0=上 1=下;預設 0.5 0.5")
+    p.add_argument("--cam-res", type=int, nargs=2, default=None, metavar=("W", "H"),
+                   help="webcam 擷取解析度。預設 640 480;使用 --zoom 大於 1 時預設 1280 720,拉近後畫面較清晰")
+    p.add_argument("--cam-zoom", type=float, default=None,
+                   help="鏡頭硬體變焦的原始數值(cv2.CAP_PROP_ZOOM),只有部分 webcam 支援;不支援時會提示並忽略")
     p.add_argument("--face-model", default=None,
                    help="face_landmarker.task 路徑(新版 mediapipe 才需要;預設放在程式旁邊,沒有就自動下載)")
     p.add_argument("--invert-cv", action="store_true",
@@ -73,6 +82,8 @@ def parse_args(argv=None):
     p.add_argument("--hl", default="EXG1", help="左眼外眥電極 HL 的通道標籤(或從 0 開始的編號)")
     p.add_argument("--bp", type=float, nargs=2, default=[0.05, 20.0], metavar=("LOW", "HIGH"))
     # 顯示與相關
+    p.add_argument("--video-weight", type=int, default=2,
+                   help="左側畫面的寬度比重(右側三張圖固定為 3);預設 2,只改變視窗版面,不影響鏡頭拉近")
     p.add_argument("--window", type=float, default=10.0, help="畫面滾動視窗(秒)")
     p.add_argument("--corr-window", type=float, default=5.0, help="相關係數滑動視窗(秒)")
     p.add_argument("--corr-interval", type=float, default=0.5, help="相關係數更新間隔(秒)")
@@ -264,6 +275,28 @@ def eye_ratio(lm, corner_a, corner_b, iris, invert=False):
     return 1.0 - r if invert else r
 
 
+def zoom_crop(frame, zoom, center_x, center_y, out_w=640, out_h=480):
+    """
+    數位變焦:以 (center_x, center_y)(0~1,影像座標,未鏡像)為中心裁切 1/zoom 的範圍,
+    再縮放成 out_w x out_h。zoom = 1 且影像本來就是 out_w x out_h 時,原樣回傳。
+    裁切區域不會超出影像邊界(中心靠近邊緣時會自動往內推)。
+    """
+    H, W = frame.shape[:2]
+    ch = H / max(zoom, 1.0)
+    cw = ch * out_w / out_h
+    if cw > W:
+        cw = float(W)
+        ch = cw * out_h / out_w
+    cw_i, ch_i = int(round(cw)), int(round(ch))
+    left = int(round(min(max(center_x * W - cw / 2, 0), W - cw_i)))
+    top = int(round(min(max(center_y * H - ch / 2, 0), H - ch_i)))
+    crop = frame[top:top + ch_i, left:left + cw_i]
+    if crop.shape[1] != out_w or crop.shape[0] != out_h:
+        interp = cv2.INTER_AREA if crop.shape[1] > out_w else cv2.INTER_LINEAR
+        crop = cv2.resize(crop, (out_w, out_h), interpolation=interp)
+    return crop
+
+
 FACE_MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/face_landmarker/"
                   "face_landmarker/float16/1/face_landmarker.task")
 
@@ -339,20 +372,31 @@ class CVThread(threading.Thread):
         except Exception as e:  # noqa: BLE001
             print(f"[CV] 無法初始化臉部地標偵測:{e}")
             return
+        zoom = max(self.args.zoom, 1.0)
+        res = self.args.cam_res or ((1280, 720) if zoom > 1.0 else (640, 480))
+        # --zoom-center 以鏡像後的畫面為準,轉回未鏡像的影像座標
+        zc_x, zc_y = 1.0 - self.args.zoom_center[0], self.args.zoom_center[1]
         cap = cv2.VideoCapture(self.args.camera)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, res[0])
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res[1])
         cap.set(cv2.CAP_PROP_FPS, 30)
         if not cap.isOpened():
             print(f"[CV] 打不開 camera {self.args.camera}")
             return
-        print("[CV] webcam 已啟動")
+        if self.args.cam_zoom is not None:
+            accepted = cap.set(cv2.CAP_PROP_ZOOM, self.args.cam_zoom)
+            now_zoom = cap.get(cv2.CAP_PROP_ZOOM)
+            print(f"[CV] 硬體變焦 {self.args.cam_zoom:g}:" +
+                  (f"已套用(讀回 {now_zoom:g})" if accepted else "這支 webcam 不支援,已忽略"))
+        print(f"[CV] webcam 已啟動:擷取 {int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
+              f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))},數位變焦 x{zoom:g}")
         idx = 0
         while not self.stop_evt.is_set():
             ok, frame = cap.read()
             t = local_clock() - self.args.cv_delay
             if not ok:
                 continue
+            frame = zoom_crop(frame, zoom, zc_x, zc_y)
             h, w = frame.shape[:2]
             lm = detect(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             gx = rr = lr = np.nan
@@ -475,6 +519,9 @@ class EOGThread(threading.Thread):
         infos = resolve_byprop("name", self.args.eeg_stream, timeout=5)
         if not infos:
             infos = resolve_byprop("type", "EEG", timeout=3)
+            if len(infos) > 1:
+                print("[EOG] 警告:找到多條 EEG 串流 " + ", ".join(f"'{i.name()}'" for i in infos)
+                      + ",目前取第一條;請先跑 check_setup.py,並用 --eeg-stream 指定正確的名稱")
         if not infos:
             print("[EOG] 找不到 LSL 串流,請確認 BioSemi LSL 已開啟,或用 --eeg-stream 指定名稱")
             return
@@ -626,7 +673,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.curves.append(pl.plot(pen=pg.mkPen(color, width=1.5)))
         self.plots[1].setYRange(0, 1)
         self.info = w.addLabel("", row=3, col=0, colspan=2, justify="left")
-        w.ci.layout.setColumnStretchFactor(0, 2)
+        w.ci.layout.setColumnStretchFactor(0, max(args.video_weight, 1))
         w.ci.layout.setColumnStretchFactor(1, 3)
 
         self.timer = QtCore.QTimer()
