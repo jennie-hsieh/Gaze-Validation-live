@@ -1,4 +1,4 @@
-# Gaze-Validation-live[README.en.md](https://github.com/user-attachments/files/33420090/README.en.md)
+# Gaze-Validation-live
 # Live comparison: CV vs Tobii vs EOG
 
 Compare three horizontal gaze signals during recording and compute their correlations in real time:
