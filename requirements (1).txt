@@ -1,0 +1,20 @@
+# gaze_validation_live.py 所需套件
+# 安裝:python -m pip install -r requirements.txt
+# (刻意不含 scipy:濾波改用 numpy 自行實作,避開 scipy.signal 在你環境的 DLL 問題)
+
+numpy>=1.24
+
+# 影像與 CV 瞳孔追蹤(舊版 mediapipe 用 solutions,0.10.30 起改用 Tasks API,
+# 首次執行會自動下載 face_landmarker.task,約 4 MB)
+opencv-python>=4.8
+mediapipe>=0.10.9
+
+# 即時畫面
+pyqtgraph>=0.13
+PySide6>=6.5
+
+# 時間同步與 BioSemi LSL 串流
+pylsl>=1.16
+
+# Tobii Pro Nano(import 名稱為 tobii_research)
+tobii-research
