@@ -60,7 +60,7 @@ With real hardware, in this order:
 4. Run:
 
 ```
-python gaze_validation_live.py
+python gaze_validation_live.py --eeg-stream ActiView --hr EXG6 --hl EXG3 --zoom 3 --no-record
 ```
 
 On startup the terminal prints the LSL stream's channel list; check that `EXG1` and `EXG5` are present. Press **Esc** or **Q** to quit.
